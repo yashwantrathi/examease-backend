@@ -16,6 +16,8 @@ from PyPDF2 import PdfReader
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
+from fastapi.middleware.cors import CORSMiddleware
+
 
 # CONFIGURATION
 SUPABASE_URL = "https://iophhaxzcikbnjcgiwta.supabase.co" 
@@ -36,16 +38,16 @@ except Exception as e:
 
 app = FastAPI()
 
-from fastapi.middleware.cors import CORSMiddleware
-
+# CORS Configuration - MUST be right after app creation
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://examease-frontend.vercel.app",
-        "https://www.examease-frontend.vercel.app"
+        "http://localhost:5173",
+        "http://localhost:3000"
     ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
