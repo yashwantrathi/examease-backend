@@ -36,10 +36,14 @@ except Exception as e:
 
 app = FastAPI()
 
-# CRITICAL: Proper CORS Configuration
+from fastapi.middleware.cors import CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5174", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "https://examease-frontend.vercel.app",
+        "https://www.examease-frontend.vercel.app"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
