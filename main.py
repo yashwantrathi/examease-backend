@@ -184,7 +184,7 @@ async def start_exam_session(data: TabSwitchRequest):
         "session_id": data.session_id,
         "started_at": str(os.environ.get('current_time', '')),
         "active": True,
-        "tab_switched": False
+        "tab_switch_count": 0
     }
     print(f"📝 Exam session started: {data.student_id} for exam {data.exam_id}")
     return {"status": "session_started", "message": "Exam session created"}
@@ -203,12 +203,12 @@ async def check_exam_session(data: TabSwitchRequest):
     
     session = active_exam_sessions[session_key]
     
-    if session.get("tab_switched"):
-        # Student switched tabs - exam is terminated
+    # If switched 2+ times, exam is terminated
+    if session.get("tab_switch_count", 0) >= 2:
         return {
             "valid": False,
-            "message": "You switched tabs during the exam. Your exam has been terminated.",
-            "tab_switched": True
+            "message": "You switched tabs twice. Your exam has been auto-submitted and terminated.",
+            "auto_submit": True
         }
     
     return {
@@ -222,16 +222,27 @@ async def handle_tab_switch(data: TabSwitchRequest):
     session_key = f"{data.student_id}_{data.exam_id}"
     
     if session_key in active_exam_sessions:
-        active_exam_sessions[session_key]["tab_switched"] = True
-        print(f"⚠️ TAB SWITCH DETECTED: {data.student_id} switched tabs during exam {data.exam_id}")
+        session = active_exam_sessions[session_key]
+        current_count = session.get("tab_switch_count", 0)
+        session["tab_switch_count"] = current_count + 1
         
-        # Log the violation
-        violation_log = f"Tab switch detected at {str(os.environ.get('current_time', ''))}"
+        print(f"⚠️ TAB SWITCH DETECTED: {data.student_id} switched tabs {session['tab_switch_count']} time(s) during exam {data.exam_id}")
+        
+        if session["tab_switch_count"] >= 2:
+            print(f"🚫 AUTO-SUBMIT TRIGGERED: {data.student_id} switched tabs 2+ times")
+            return {
+                "status": "auto_submit_triggered",
+                "message": "You switched tabs twice. Your exam will be auto-submitted.",
+                "auto_submit": True
+            }
+        
+        return {
+            "status": "tab_switch_recorded",
+            "message": "⚠️ Tab switch detected! One more switch will auto-submit your exam.",
+            "switch_count": session["tab_switch_count"]
+        }
     
-    return {
-        "status": "tab_switch_recorded",
-        "message": "Tab switch recorded. If you continue, exam will be terminated."
-    }
+    return {"status": "session_not_found", "message": "No active exam session"}
 
 @app.post("/session/end-exam")
 async def end_exam_session(data: TabSwitchRequest):
@@ -240,11 +251,12 @@ async def end_exam_session(data: TabSwitchRequest):
     
     if session_key in active_exam_sessions:
         session_info = active_exam_sessions[session_key]
+        switch_count = session_info.get("tab_switch_count", 0)
         del active_exam_sessions[session_key]
-        print(f"✅ Exam session ended: {data.student_id} for exam {data.exam_id}")
+        print(f"✅ Exam session ended: {data.student_id} for exam {data.exam_id} (switches: {switch_count})")
         return {
             "status": "session_ended",
-            "tab_switched": session_info.get("tab_switched", False)
+            "tab_switch_count": switch_count
         }
     
     return {"status": "session_ended", "message": "No active session found"}
@@ -791,6 +803,17 @@ async def submit_exam_result(sub: SubmissionCreate):
         # Get student email for storage
         student_email = get_user_email(sub.student_id)
         
+        # Check if exam had tab switches during session
+        session_key = f"{sub.student_id}_{sub.exam_id}"
+        switch_count = 0
+        if session_key in active_exam_sessions:
+            switch_count = active_exam_sessions[session_key].get("tab_switch_count", 0)
+        
+        # Build cheating_log based on switch count
+        cheating_log = sub.cheating_log if sub.cheating_log else []
+        if switch_count >= 1:
+            cheating_log.append(f"Tab switched {switch_count} time(s)")
+        
         data = {
             "exam_id": sub.exam_id,
             "student_id": sub.student_id,
@@ -800,11 +823,16 @@ async def submit_exam_result(sub: SubmissionCreate):
             "time_taken_seconds": sub.time_taken_seconds,
             "student_answers": sub.student_answers,
             "feedback_json": sub.feedback_json,
-            "cheating_log": sub.cheating_log,
+            "cheating_log": cheating_log,
             "score": f"{sub.score_numeric}/{sub.total_marks}"
         }
         supabase.table("submissions").insert(data).execute()
-        print(f"✅ Exam result submitted for {student_email}")
+        print(f"✅ Exam result submitted for {student_email} (cheating_log: {cheating_log})")
+        
+        # Clean up session
+        if session_key in active_exam_sessions:
+            del active_exam_sessions[session_key]
+        
         return {"message": "Exam result saved successfully"}
     except Exception as e:
         print(f"❌ Submit Result Error: {e}")
@@ -835,6 +863,10 @@ async def get_teacher_stats(teacher_id: str):
             student_email = s.get("student_email") or get_user_email(s["student_id"])
             print(f"Student {s['student_id']} -> {student_email}")
             
+            # Determine if exam was clean or unclean based on cheating_log
+            cheating_log = s.get("cheating_log") or []
+            flag_status = "Unclean" if len(cheating_log) > 0 else "Clean"
+            
             results.append({
                 "exam_key": s["exam_id"],
                 "exam_name": exam_map.get(s["exam_id"], "Unknown"),
@@ -843,7 +875,8 @@ async def get_teacher_stats(teacher_id: str):
                 "max_marks": s["total_marks"],
                 "time_taken": round(s["time_taken_seconds"] / 60, 2),
                 "date": s["created_at"].split("T")[0],
-                "cheating_flags": len(s.get("cheating_log") or [])
+                "flag_status": flag_status,
+                "cheating_flags": cheating_log
             })
         
         print(f"Returning {len(results)} results")
