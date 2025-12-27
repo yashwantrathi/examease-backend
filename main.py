@@ -5,6 +5,7 @@ import io
 import random
 import string
 import base64
+from datetime import datetime
 from collections import Counter
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -468,14 +469,28 @@ async def get_teacher_assignments(teacher_id: str):
                 try:
                     # Get student email from lookup
                     student_email = get_user_email(sub["student_id"])
-                    student_name = extract_name_from_email(student_email)
+                    # If email lookup failed, just use student_id
+                    if student_email == "unknown@unknown.com":
+                        student_name = sub["student_id"]
+                    else:
+                        student_name = extract_name_from_email(student_email)
+                    
+                    # Format the timestamp properly
+                    submitted_at = sub.get("created_at", "")
+                    if submitted_at:
+                        try:
+                            # Parse ISO format and convert to readable format
+                            dt = datetime.fromisoformat(submitted_at.replace('Z', '+00:00'))
+                            submitted_at = dt.strftime("%d/%m/%Y, %H:%M:%S")
+                        except:
+                            submitted_at = "N/A"
                     
                     submissions.append({
                         "id": sub["id"],
                         "student_id": sub["student_id"],
                         "student_name": student_name,
-                        "student_email": student_email,
-                        "submitted_at": sub.get("created_at", "N/A"),
+                        "student_email": student_email if student_email != "unknown@unknown.com" else "N/A",
+                        "submitted_at": submitted_at,
                         "file_data": sub.get("file_data", "")
                     })
                 except Exception as e:
@@ -542,6 +557,15 @@ async def get_student_assignments(student_id: str):
             submission = submission_map.get(assignment_id)
             has_submitted = submission is not None
             
+            # Format submitted_at timestamp if exists
+            submitted_at = None
+            if submission and submission.get("created_at"):
+                try:
+                    dt = datetime.fromisoformat(submission["created_at"].replace('Z', '+00:00'))
+                    submitted_at = dt.isoformat()
+                except:
+                    submitted_at = submission.get("created_at")
+            
             print(f"Assignment {assignment_id}: has_submitted = {has_submitted}")
             
             assignments.append({
@@ -551,7 +575,7 @@ async def get_student_assignments(student_id: str):
                 "deadline": a["deadline"],
                 "created_at": a.get("created_at", ""),
                 "has_submitted": has_submitted,
-                "submitted_at": submission.get("created_at") if submission else None
+                "submitted_at": submitted_at
             })
         
         print(f"Returning {len(assignments)} assignments with submission status")
@@ -588,7 +612,8 @@ async def submit_assignment(
         data = {
             "assignment_id": str(assignment_id),
             "student_id": student_id,
-            "file_data": b64_encoded 
+            "file_data": b64_encoded,
+            "created_at": datetime.utcnow().isoformat()
         }
         
         result = supabase.table("assignment_submissions").insert(data).execute()
