@@ -466,8 +466,8 @@ async def get_teacher_assignments(teacher_id: str):
             submissions = []
             for sub in subs_res.data:
                 try:
-                    # Try to use stored email first, fallback to lookup
-                    student_email = sub.get("student_email") or get_user_email(sub["student_id"])
+                    # Get student email from lookup
+                    student_email = get_user_email(sub["student_id"])
                     student_name = extract_name_from_email(student_email)
                     
                     submissions.append({
