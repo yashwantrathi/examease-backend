@@ -465,40 +465,90 @@ async def get_teacher_assignments(teacher_id: str):
             
             for sub in subs_res.data:
                 try:
-                    # Get student email from lookup
-                    student_email = get_user_email(sub["student_id"])
+                    # ⭐ PRIORITY 1: Use stored email from submission
+                    student_email = sub.get("student_email", "")
+                    
+                    # ⭐ FALLBACK: If no email in submission, try lookup
+                    if not student_email:
+                        student_email = get_user_email(sub["student_id"])
+                        print(f"⚠️ Had to lookup email for {sub['student_id']}: {student_email}")
                     
                     # Format the timestamp properly
                     submitted_at = sub.get("created_at", "")
                     status = "Late"  # Default to Late
+                    submitted_at_formatted = "N/A"
                     
                     if submitted_at:
                         try:
-                            # Parse submission datetime
-                            submitted_dt = datetime.fromisoformat(submitted_at.replace('Z', '+00:00'))
+                            # ⭐ IMPROVED: Handle multiple datetime formats
+                            # Remove 'Z' and handle timezone
+                            if 'Z' in submitted_at:
+                                clean_dt = submitted_at.replace('Z', '+00:00')
+                            elif '+' not in submitted_at:
+                                clean_dt = submitted_at + '+00:00'
+                            else:
+                                clean_dt = submitted_at
+                            
+                            # Remove microseconds if present (keep only seconds)
+                            if '.' in clean_dt:
+                                clean_dt = clean_dt.split('.')[0] + clean_dt.split('.')[-1][-6:]
+                            
+                            try:
+                                submitted_dt = datetime.fromisoformat(clean_dt)
+                            except:
+                                # Final fallback: just parse the date part
+                                clean_dt = submitted_at.replace('Z', '').split('.')[0]
+                                submitted_dt = datetime.fromisoformat(clean_dt)
+                            
                             submitted_at_formatted = submitted_dt.strftime("%d/%m/%Y, %H:%M:%S")
                             
                             # Compare with deadline
                             if deadline:
-                                deadline_dt = datetime.fromisoformat(deadline.replace('Z', '+00:00'))
-                                if submitted_dt <= deadline_dt:
-                                    status = "On Time"
+                                try:
+                                    if 'Z' in deadline:
+                                        clean_deadline = deadline.replace('Z', '+00:00')
+                                    elif '+' not in deadline:
+                                        clean_deadline = deadline + '+00:00'
+                                    else:
+                                        clean_deadline = deadline
+                                    
+                                    if '.' in clean_deadline:
+                                        clean_deadline = clean_deadline.split('.')[0] + clean_deadline.split('.')[-1][-6:]
+                                    
+                                    try:
+                                        deadline_dt = datetime.fromisoformat(clean_deadline)
+                                    except:
+                                        clean_deadline = deadline.replace('Z', '').split('.')[0]
+                                        deadline_dt = datetime.fromisoformat(clean_deadline)
+                                    
+                                    if submitted_dt <= deadline_dt:
+                                        status = "On Time"
+                                except Exception as deadline_err:
+                                    print(f"⚠️ Could not parse deadline: {deadline} - {deadline_err}")
+                                    
                         except Exception as parse_err:
-                            print(f"Debug: DateTime parse error - {parse_err}")
-                            submitted_at_formatted = "Invalid Date"
-                    else:
-                        submitted_at_formatted = "N/A"
+                            print(f"⚠️ DateTime parse error for {submitted_at}: {parse_err}")
+                            # ⭐ BETTER FALLBACK: Show raw date instead of "Invalid Date"
+                            if 'T' in submitted_at:
+                                submitted_at_formatted = submitted_at.split('T')[0]
+                            else:
+                                submitted_at_formatted = submitted_at[:10] if len(submitted_at) >= 10 else submitted_at
                     
                     submissions.append({
                         "id": sub["id"],
                         "student_id": sub["student_id"],
-                        "student_email": student_email if student_email else "Unknown",
+                        "student_email": student_email if student_email else "No email found",
                         "submitted_at": submitted_at_formatted,
                         "status": status,
                         "file_data": sub.get("file_data", "")
                     })
+                    
+                    print(f"✅ Processed: {student_email} - {submitted_at_formatted} - {status}")
+                    
                 except Exception as e:
-                    print(f"Error processing submission: {e}")
+                    print(f"❌ Error processing submission: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
             
             assignments.append({
@@ -603,6 +653,10 @@ async def submit_assignment(
         
         print(f"📤 Submitting assignment: ID={assignment_id}, Student={student_id}")
         
+        # ⭐ GET STUDENT EMAIL BEFORE CHECKING DUPLICATES
+        student_email = get_user_email(student_id)
+        print(f"✅ Student email retrieved: {student_email}")
+        
         # Check for duplicates
         check = supabase.table("assignment_submissions")\
             .select("*")\
@@ -613,15 +667,17 @@ async def submit_assignment(
         if check.data:
             raise HTTPException(status_code=400, detail="You have already submitted this assignment")
 
+        # ⭐ STORE EMAIL ALONG WITH SUBMISSION AND ADD TIMEZONE
         data = {
             "assignment_id": str(assignment_id),
             "student_id": student_id,
+            "student_email": student_email,  # ⭐ ADD THIS
             "file_data": b64_encoded,
-            "created_at": datetime.utcnow().isoformat()
+            "created_at": datetime.utcnow().isoformat() + "Z"  # ⭐ ADD Z for timezone
         }
         
         result = supabase.table("assignment_submissions").insert(data).execute()
-        print(f"✅ Assignment submitted successfully")
+        print(f"✅ Assignment submitted successfully for {student_email}")
         
         return {"message": "Assignment submitted successfully"}
     except HTTPException:
@@ -923,4 +979,4 @@ if __name__ == "__main__":
     print(f"📦 Max file size: {MAX_FILE_SIZE // (1024*1024)}MB")
     print("\n⚠️  Make sure frontend is configured to use http://localhost:8000\n")
     
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)             
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
