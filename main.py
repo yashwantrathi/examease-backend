@@ -667,13 +667,14 @@ async def submit_assignment(
         if check.data:
             raise HTTPException(status_code=400, detail="You have already submitted this assignment")
 
-        # ⭐ STORE EMAIL ALONG WITH SUBMISSION AND ADD TIMEZONE
+        # Insert submission with timestamp and email
+        from datetime import datetime
         data = {
             "assignment_id": str(assignment_id),
             "student_id": student_id,
-            "student_email": student_email,  # ⭐ ADD THIS
             "file_data": b64_encoded,
-            "created_at": datetime.utcnow().isoformat() + "Z"  # ⭐ ADD Z for timezone
+            "student_email": student_email,
+            "submitted_at": datetime.utcnow().isoformat()
         }
         
         result = supabase.table("assignment_submissions").insert(data).execute()
