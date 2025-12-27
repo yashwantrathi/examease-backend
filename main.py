@@ -16,7 +16,6 @@ from PyPDF2 import PdfReader
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
-from fastapi.middleware.cors import CORSMiddleware
 
 
 # CONFIGURATION
@@ -270,66 +269,73 @@ async def generate_quiz(
     
     content = ""
     try:
-        pdf_reader = PdfReader(io.BytesIO(file_bytes))
+        try:
+            pdf_reader = PdfReader(io.BytesIO(file_bytes))
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "eof" in error_msg or "marker" in error_msg:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="The PDF file appears to be corrupted or incomplete. Please try uploading the file again or use a different PDF."
+                )
+            raise
         
-        for i, page in enumerate(pdf_reader.pages):
-            if i >= 20:  # Limit to 20 pages
-                break
-            text = page.extract_text()
-            if text:
-                content += text + "\n"
+        if not pdf_reader.pages:
+            raise HTTPException(status_code=400, detail="PDF file is empty. Please provide a PDF with content.")
         
-        print(f"✅ Extracted {len(content)} characters from PDF")
+        # OPTIMIZATION: Limit to first 15 pages (most content is in early pages)
+        max_pages = min(15, len(pdf_reader.pages))
+        
+        for i in range(max_pages):
+            page = pdf_reader.pages[i]
+            try:
+                text = page.extract_text()
+                if text:
+                    content += text + "\n"
+            except Exception as page_error:
+                print(f"⚠️ Warning: Could not extract text from page {i+1}: {page_error}")
+                continue
+        
+        print(f"✅ Extracted {len(content)} characters from {max_pages} pages")
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ PDF Error: {e}")
-        raise HTTPException(status_code=400, detail=f"PDF processing failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="PDF processing failed. The file may be corrupted, encrypted, or in an unsupported format.")
 
     if not content.strip():
         raise HTTPException(status_code=400, detail="Could not extract text from PDF. Please ensure it's not scanned/image-based.")
 
+    # OPTIMIZATION: Reduce content size for faster API processing
+    # Remove excessive whitespace and compress content
+    content = " ".join(content.split())  # Remove extra spaces, tabs, newlines
+    
+    # Limit to 15,000 characters - plenty for quality questions, much faster processing
+    if len(content) > 15000:
+        content = content[:15000]
+        print(f"⚠️ Content truncated to 15,000 chars for faster processing")
+    else:
+        print(f"✅ Content size: {len(content)} chars")
+
     # Generate Questions - MAIN EXAM and DEMO EXAM (same count)
     total_q = num_questions * 2  # Generate double: half for main, half for demo
     
-    prompt = f"""You are an expert exam creator. Based on the following text, generate exactly {total_q} high-quality exam questions.
+    # OPTIMIZATION: Use concise prompt to reduce processing time
+    prompt = f"""Create {total_q} exam questions from this text. Mix MCQ (40%) and subjective (60%).
 
-SOURCE TEXT:
-{content[:30000]}
+TEXT:
+{content}
 
-REQUIREMENTS:
-1. Create {total_q} questions total
-2. Mix of MCQ (multiple choice) and subjective (open-ended) questions
-3. Questions should test understanding, not just memorization
-4. For MCQ: provide exactly 4 options
-5. Topic focus: {topic}
-6. Ensure variety - don't repeat similar questions
-
-OUTPUT FORMAT (JSON only, no markdown):
-[
-  {{
-    "id": 1,
-    "type": "mcq",
-    "question": "What is the main concept?",
-    "options": ["Option A", "Option B", "Option C", "Option D"],
-    "answer": "Option A",
-    "marks": 1
-  }},
-  {{
-    "id": 2,
-    "type": "subjective",
-    "question": "Explain the process...",
-    "options": null,
-    "answer": "Key points: ...",
-    "marks": 2
-  }}
-]
-
-Generate exactly {total_q} questions now:"""
+For MCQ: 4 options (A,B,C,D)
+Topic: {topic}
+Format: JSON array only, no markdown.
+[{{"id":1,"type":"mcq","question":"?","options":["A","B","C","D"],"answer":"A","marks":1}},{{"id":2,"type":"subjective","question":"?","options":null,"answer":"answer","marks":2}}]"""
     
     try:
         response = model.generate_content(prompt)
         clean_text = response.text.strip()
         
-        # Clean response
+        # Clean response - remove markdown code blocks
         if clean_text.startswith("```json"):
             clean_text = clean_text[7:]
         if clean_text.startswith("```"):
@@ -892,4 +898,4 @@ if __name__ == "__main__":
     print(f"📦 Max file size: {MAX_FILE_SIZE // (1024*1024)}MB")
     print("\n⚠️  Make sure frontend is configured to use http://localhost:8000\n")
     
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)             
