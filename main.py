@@ -585,13 +585,9 @@ async def submit_assignment(
         if check.data:
             raise HTTPException(status_code=400, detail="You have already submitted this assignment")
 
-        # Try to get student email for storage
-        student_email = get_user_email(student_id)
-        
         data = {
             "assignment_id": str(assignment_id),
             "student_id": student_id,
-            "student_email": student_email,
             "file_data": b64_encoded 
         }
         
