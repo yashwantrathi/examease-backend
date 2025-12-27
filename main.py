@@ -611,16 +611,49 @@ async def get_student_assignments(student_id: str):
             submission = submission_map.get(assignment_id)
             has_submitted = submission is not None
             
-            # Format submitted_at timestamp if exists
+            # ⭐ FORMAT TIMESTAMP PROPERLY FOR FRONTEND
             submitted_at = None
+            submitted_at_formatted = None
+            
             if submission and submission.get("created_at"):
                 try:
-                    dt = datetime.fromisoformat(submission["created_at"].replace('Z', '+00:00'))
+                    # Get the raw timestamp
+                    raw_timestamp = submission["created_at"]
+                    print(f"Raw timestamp from DB: {raw_timestamp}")
+                    
+                    # Parse the timestamp with multiple strategies
+                    if 'Z' in raw_timestamp:
+                        clean_dt = raw_timestamp.replace('Z', '+00:00')
+                    elif '+' not in raw_timestamp:
+                        clean_dt = raw_timestamp + '+00:00'
+                    else:
+                        clean_dt = raw_timestamp
+                    
+                    # Remove microseconds if present
+                    if '.' in clean_dt:
+                        clean_dt = clean_dt.split('.')[0] + clean_dt.split('.')[-1][-6:]
+                    
+                    try:
+                        dt = datetime.fromisoformat(clean_dt)
+                    except:
+                        # Final fallback
+                        clean_dt = raw_timestamp.replace('Z', '').split('.')[0]
+                        dt = datetime.fromisoformat(clean_dt)
+                    
+                    # Format for display: "28/12/2025, 14:30:45"
+                    submitted_at_formatted = dt.strftime("%d/%m/%Y, %H:%M:%S")
+                    # Also keep ISO format for any other use
                     submitted_at = dt.isoformat()
-                except:
+                    
+                    print(f"✅ Parsed timestamp: {submitted_at_formatted}")
+                    
+                except Exception as parse_err:
+                    print(f"⚠️ Timestamp parse error: {parse_err}")
+                    # Fallback to raw value
                     submitted_at = submission.get("created_at")
+                    submitted_at_formatted = ""  # Empty string so frontend shows just "✅Submitted"
             
-            print(f"Assignment {assignment_id}: has_submitted = {has_submitted}")
+            print(f"Assignment {assignment_id}: has_submitted = {has_submitted}, submitted_at = {submitted_at_formatted}")
             
             assignments.append({
                 "id": a["id"],
@@ -629,7 +662,8 @@ async def get_student_assignments(student_id: str):
                 "deadline": a["deadline"],
                 "created_at": a.get("created_at", ""),
                 "has_submitted": has_submitted,
-                "submitted_at": submitted_at
+                "submitted_at": submitted_at,  # ISO format for backend processing
+                "submitted_at_formatted": submitted_at_formatted  # Human-readable format for display
             })
         
         print(f"Returning {len(assignments)} assignments with submission status")
@@ -667,14 +701,13 @@ async def submit_assignment(
         if check.data:
             raise HTTPException(status_code=400, detail="You have already submitted this assignment")
 
-        # Insert submission with timestamp and email
-        from datetime import datetime
+        # ⭐ STORE EMAIL ALONG WITH SUBMISSION AND ADD TIMEZONE
         data = {
             "assignment_id": str(assignment_id),
             "student_id": student_id,
+            "student_email": student_email,  # ⭐ ADD THIS
             "file_data": b64_encoded,
-            "student_email": student_email,
-            "submitted_at": datetime.utcnow().isoformat()
+            "created_at": datetime.utcnow().isoformat() + "Z"  # ⭐ ADD Z for timezone
         }
         
         result = supabase.table("assignment_submissions").insert(data).execute()
