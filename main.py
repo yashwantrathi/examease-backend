@@ -128,36 +128,32 @@ async def validate_file_size(file: UploadFile) -> bytes:
     return content
 
 def get_user_email(user_id: str) -> str:
-    """Fetch user email from profiles table or Supabase auth"""
+    """Fetch user email from Supabase auth or profiles table"""
     try:
-        # Try profiles table first (preferred)
+        # First try to get directly from auth.users via admin
+        try:
+            auth_user = supabase.auth.admin.get_user_by_id(user_id)
+            if auth_user and auth_user.user and auth_user.user.email:
+                print(f"✅ Got email from auth for {user_id}: {auth_user.user.email}")
+                return auth_user.user.email
+        except Exception as auth_e:
+            print(f"⚠️ Auth lookup failed: {auth_e}")
+        
+        # Try profiles table as fallback
         profile = supabase.table("profiles").select("email,user_metadata").eq("id", user_id).execute()
         if profile.data and len(profile.data) > 0:
             record = profile.data[0]
-            # Check for direct email field
             if record.get("email"):
                 return record["email"]
-            # Check for email in user_metadata
             if record.get("user_metadata") and isinstance(record["user_metadata"], dict):
                 if record["user_metadata"].get("email"):
                     return record["user_metadata"]["email"]
-        
-        # If not in profiles, try to get from metadata stored during submission
-        print(f"🔍 Fetching email for user: {user_id}")
-        try:
-            # Last resort: try direct auth lookup (may fail due to RLS)
-            auth_user = supabase.auth.admin.get_user_by_id(user_id)
-            if auth_user and auth_user.user and auth_user.user.email:
-                return auth_user.user.email
-        except Exception as auth_e:
-            print(f"⚠️ Auth lookup blocked: {auth_e}")
-            pass
             
     except Exception as e:
         print(f"⚠️ Could not fetch email for user {user_id}: {e}")
     
-    print(f"⚠️ No email found for user {user_id}, returning unknown")
-    return "unknown@unknown.com"
+    print(f"⚠️ No email found for user {user_id}")
+    return ""
 
 # --- ENDPOINTS ---
 
@@ -465,32 +461,40 @@ async def get_teacher_assignments(teacher_id: str):
             
             # Get student details
             submissions = []
+            deadline = a.get("deadline", "")
+            
             for sub in subs_res.data:
                 try:
                     # Get student email from lookup
                     student_email = get_user_email(sub["student_id"])
-                    # If email lookup failed, just use student_id
-                    if student_email == "unknown@unknown.com":
-                        student_name = sub["student_id"]
-                    else:
-                        student_name = extract_name_from_email(student_email)
                     
                     # Format the timestamp properly
                     submitted_at = sub.get("created_at", "")
+                    status = "Late"  # Default to Late
+                    
                     if submitted_at:
                         try:
-                            # Parse ISO format and convert to readable format
-                            dt = datetime.fromisoformat(submitted_at.replace('Z', '+00:00'))
-                            submitted_at = dt.strftime("%d/%m/%Y, %H:%M:%S")
-                        except:
-                            submitted_at = "N/A"
+                            # Parse submission datetime
+                            submitted_dt = datetime.fromisoformat(submitted_at.replace('Z', '+00:00'))
+                            submitted_at_formatted = submitted_dt.strftime("%d/%m/%Y, %H:%M:%S")
+                            
+                            # Compare with deadline
+                            if deadline:
+                                deadline_dt = datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+                                if submitted_dt <= deadline_dt:
+                                    status = "On Time"
+                        except Exception as parse_err:
+                            print(f"Debug: DateTime parse error - {parse_err}")
+                            submitted_at_formatted = "Invalid Date"
+                    else:
+                        submitted_at_formatted = "N/A"
                     
                     submissions.append({
                         "id": sub["id"],
                         "student_id": sub["student_id"],
-                        "student_name": student_name,
-                        "student_email": student_email if student_email != "unknown@unknown.com" else "N/A",
-                        "submitted_at": submitted_at,
+                        "student_email": student_email if student_email else "Unknown",
+                        "submitted_at": submitted_at_formatted,
+                        "status": status,
                         "file_data": sub.get("file_data", "")
                     })
                 except Exception as e:
