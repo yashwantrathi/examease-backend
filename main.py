@@ -860,7 +860,17 @@ async def get_teacher_stats(teacher_id: str):
         results = []
         for s in subs.data:
             # Try to use stored email from submission, fallback to lookup
-            student_email = s.get("student_email") or get_user_email(s["student_id"])
+            student_email = s.get("student_email")
+            
+            # If no email in submission, fetch from auth
+            if not student_email:
+                student_email = get_user_email(s["student_id"])
+            
+            # If still no email, don't use "unknown@unknown.com" - skip or use a placeholder
+            if not student_email:
+                print(f"⚠️ No email found for student {s['student_id']}, skipping this submission")
+                continue
+            
             print(f"Student {s['student_id']} -> {student_email}")
             
             # Determine if exam was clean or unclean based on cheating_log
@@ -958,7 +968,17 @@ async def get_teacher_feedback(teacher_id: str):
         all_feedback = []
         
         for sub in submissions.data:
-            student_email = sub.get("student_email", "unknown@unknown.com")
+            student_email = sub.get("student_email")
+            
+            # If no email in submission, fetch from auth
+            if not student_email:
+                student_email = get_user_email(sub["student_id"])
+            
+            # If still no email, skip this submission instead of showing "unknown@unknown.com"
+            if not student_email:
+                print(f"⚠️ No email found for student {sub['student_id']}, skipping feedback entry")
+                continue
+            
             student_name = extract_name_from_email(student_email)
             exam_info = exam_map.get(sub["exam_id"], {"title": "Unknown", "subject": "Unknown"})
             subject = exam_info["subject"]
