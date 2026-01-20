@@ -42,9 +42,10 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://examease-frontend.vercel.app",  # Your frontend URL
-        "http://localhost:5173",  # Local Vite dev server
-        "http://localhost:3000"   # Alternative local port
+        "https://examease-frontend.vercel.app",
+        "https://examease-backend-4bdx.onrender.com",
+        "http://localhost:5173", 
+        "http://localhost:3000"  
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
