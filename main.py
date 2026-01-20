@@ -42,9 +42,7 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://examease-frontend.vercel.app",
-        "http://localhost:5173",
-        "http://localhost:3000"
+        "*"
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -102,6 +100,20 @@ class TabSwitchRequest(BaseModel):
     session_id: str
     action: str  # "start_exam", "still_active", "tab_switched"
 
+class UserSignup(BaseModel):
+    email: str
+    password: str
+    role: str  # "student" or "teacher"
+    full_name: Optional[str] = None
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+class ProfileUpdate(BaseModel):
+    full_name: Optional[str] = None
+    role: Optional[str] = None
+
 # --- HELPER FUNCTIONS ---
 def extract_name_from_email(email: str) -> str:
     """Extract a readable name from email address"""
@@ -155,6 +167,42 @@ def get_user_email(user_id: str) -> str:
     print(f"⚠️ No email found for user {user_id}")
     return ""
 
+def get_user_name(user_id: str) -> str:
+    """Fetch user's full name from profiles table"""
+    try:
+        print(f"🔍 Fetching name for user_id: {user_id}")
+        
+        result = supabase.table("profiles")\
+            .select("full_name")\
+            .eq("id", user_id)\
+            .maybe_single()\
+            .execute()
+        
+        print(f"📊 Profile query result: {result.data}")
+        
+        if result.data and result.data.get("full_name"):
+            print(f"✅ Found name: {result.data['full_name']}")
+            return result.data["full_name"]
+        
+        # Fallback: try to get from auth metadata
+        try:
+            user_res = supabase.auth.admin.get_user_by_id(user_id)
+            if user_res and user_res.user and user_res.user.user_metadata:
+                full_name = user_res.user.user_metadata.get("full_name")
+                if full_name:
+                    print(f"✅ Found name in auth metadata: {full_name}")
+                    return full_name
+        except Exception as auth_err:
+            print(f"⚠️ Auth metadata lookup failed: {auth_err}")
+        
+        print(f"⚠️ No name found for user {user_id}, returning 'Unknown User'")
+        return "Unknown User"
+    except Exception as e:
+        print(f"❌ Error fetching name for user {user_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        return "Unknown User"
+
 # --- ENDPOINTS ---
 
 @app.get("/")
@@ -170,6 +218,234 @@ def health_check():
         "gemini": "configured",
         "max_file_size_mb": MAX_FILE_SIZE // (1024*1024)
     }
+
+# --- AUTHENTICATION ENDPOINTS ---
+
+@app.post("/auth/signup")
+async def signup(user: UserSignup):
+    """Create a new user account (student or teacher)"""
+    print("entering signup")
+    try:
+        print(f"📝 Signup attempt: {user.email} as {user.role}")
+        
+        # Validate role
+        if user.role not in ["student", "teacher"]:
+            raise HTTPException(status_code=400, detail="Role must be 'student' or 'teacher'")
+        
+        # Create user in Supabase Auth
+        auth_response = supabase.auth.sign_up({
+            "email": user.email,
+            "password": user.password,
+            "options": {
+                "data": {
+                    "role": user.role,
+                    "full_name": user.full_name or user.email.split('@')[0]
+                }
+            }
+        })
+        
+        if not auth_response.user:
+            raise HTTPException(status_code=400, detail="Failed to create user")
+        
+        user_id = auth_response.user.id
+        
+        # Create profile in profiles table
+        profile_data = {
+            "id": user_id,
+            "email": user.email,
+            "role": user.role,
+            "full_name": user.full_name or user.email.split('@')[0],
+            "created_at": datetime.utcnow().isoformat() + "Z"
+        }
+        
+        try:
+            supabase.table("profiles").insert(profile_data).execute()
+        except Exception as profile_error:
+            print(f"⚠️ Profile creation error (may be handled by trigger): {profile_error}")
+        
+        print(f"✅ User created: {user.email} ({user.role})")
+        
+        return {
+            "message": "User created successfully",
+            "user": {
+                "id": user_id,
+                "email": user.email,
+                "role": user.role,
+                "full_name": user.full_name or user.email.split('@')[0]
+            },
+            "session": {
+                "access_token": auth_response.session.access_token if auth_response.session else None,
+                "refresh_token": auth_response.session.refresh_token if auth_response.session else None
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Signup Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/auth/login")
+async def login(credentials: UserLogin):
+    """Login user and return session tokens"""
+    try:
+        print(f"🔐 Login attempt: {credentials.email}")
+        
+        # Sign in with Supabase Auth
+        auth_response = supabase.auth.sign_in_with_password({
+            "email": credentials.email,
+            "password": credentials.password
+        })
+        
+        if not auth_response.user:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        
+        user_id = auth_response.user.id
+        
+        # Get user profile to fetch role
+        profile = supabase.table("profiles").select("*").eq("id", user_id).execute()
+        
+        user_role = "student"  # default
+        full_name = credentials.email.split('@')[0]
+        
+        if profile.data and len(profile.data) > 0:
+            user_role = profile.data[0].get("role", "student")
+            full_name = profile.data[0].get("full_name", full_name)
+        else:
+            # Check user metadata if profile doesn't exist
+            if auth_response.user.user_metadata:
+                user_role = auth_response.user.user_metadata.get("role", "student")
+                full_name = auth_response.user.user_metadata.get("full_name", full_name)
+        
+        print(f"✅ Login successful: {credentials.email} ({user_role})")
+        
+        return {
+            "message": "Login successful",
+            "user": {
+                "id": user_id,
+                "email": credentials.email,
+                "role": user_role,
+                "full_name": full_name
+            },
+            "session": {
+                "access_token": auth_response.session.access_token,
+                "refresh_token": auth_response.session.refresh_token
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Login Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+@app.get("/auth/profile/{user_id}")
+async def get_profile(user_id: str):
+    """Get user profile including role"""
+    try:
+        # Try to get from profiles table
+        profile = supabase.table("profiles").select("*").eq("id", user_id).execute()
+        
+        if profile.data and len(profile.data) > 0:
+            return profile.data[0]
+        
+        # Fallback: get from auth user metadata
+        try:
+            auth_user = supabase.auth.admin.get_user_by_id(user_id)
+            if auth_user and auth_user.user:
+                return {
+                    "id": user_id,
+                    "email": auth_user.user.email,
+                    "role": auth_user.user.user_metadata.get("role", "student"),
+                    "full_name": auth_user.user.user_metadata.get("full_name", auth_user.user.email.split('@')[0])
+                }
+        except Exception as auth_error:
+            print(f"Auth lookup error: {auth_error}")
+        
+        raise HTTPException(status_code=404, detail="User profile not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Get Profile Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/auth/profile/{user_id}")
+async def update_profile(user_id: str, update: ProfileUpdate):
+    """Update user profile"""
+    try:
+        update_data = {}
+        if update.full_name is not None:
+            update_data["full_name"] = update.full_name
+        if update.role is not None:
+            if update.role not in ["student", "teacher"]:
+                raise HTTPException(status_code=400, detail="Role must be 'student' or 'teacher'")
+            update_data["role"] = update.role
+        
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No fields to update")
+        
+        # Update profiles table
+        result = supabase.table("profiles").update(update_data).eq("id", user_id).execute()
+        
+        print(f"✅ Profile updated for user {user_id}")
+        return {"message": "Profile updated successfully", "data": result.data[0] if result.data else {}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Update Profile Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/auth/logout")
+async def logout():
+    """Logout user"""
+    try:
+        supabase.auth.sign_out()
+        return {"message": "Logged out successfully"}
+    except Exception as e:
+        print(f"❌ Logout Error: {e}")
+        return {"message": "Logged out"}
+
+@app.get("/auth/check-role/{user_id}")
+async def check_user_role(user_id: str):
+    """Check if user is a teacher or student"""
+    try:
+        profile = supabase.table("profiles").select("role").eq("id", user_id).execute()
+        
+        if profile.data and len(profile.data) > 0:
+            role = profile.data[0].get("role", "student")
+            return {
+                "user_id": user_id,
+                "role": role,
+                "is_teacher": role == "teacher",
+                "is_student": role == "student"
+            }
+        
+        # Fallback to auth metadata
+        try:
+            auth_user = supabase.auth.admin.get_user_by_id(user_id)
+            if auth_user and auth_user.user and auth_user.user.user_metadata:
+                role = auth_user.user.user_metadata.get("role", "student")
+                return {
+                    "user_id": user_id,
+                    "role": role,
+                    "is_teacher": role == "teacher",
+                    "is_student": role == "student"
+                }
+        except Exception:
+            pass
+        
+        # Default to student if not found
+        return {
+            "user_id": user_id,
+            "role": "student",
+            "is_teacher": False,
+            "is_student": True
+        }
+    except Exception as e:
+        print(f"❌ Check Role Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # In-memory session store (for runtime tracking)
 active_exam_sessions = {}
@@ -335,10 +611,15 @@ async def generate_quiz(
 TEXT:
 {content}
 
-For MCQ: 4 options (A,B,C,D)
 Topic: {topic}
+
+IMPORTANT RULES:
+1. For MCQ: Create 4 distinct options. The "answer" field MUST contain the EXACT FULL TEXT of the correct option, NOT just a letter like A/B/C/D.
+2. For subjective: The "answer" field should contain a complete model answer.
+
 Format: JSON array only, no markdown.
-[{{"id":1,"type":"mcq","question":"?","options":["A","B","C","D"],"answer":"A","marks":1}},{{"id":2,"type":"subjective","question":"?","options":null,"answer":"answer","marks":2}}]"""
+Example MCQ: {{"id":1,"type":"mcq","question":"What is the capital of France?","options":["London","Paris","Berlin","Madrid"],"answer":"Paris","marks":1}}
+Example Subjective: {{"id":2,"type":"subjective","question":"Explain photosynthesis","options":null,"answer":"Photosynthesis is the process by which plants convert sunlight into energy...","marks":2}}"""
     
     try:
         response = model.generate_content(prompt)
@@ -358,6 +639,29 @@ Format: JSON array only, no markdown.
         
         if len(all_questions) < total_q:
             raise HTTPException(status_code=500, detail="AI generated fewer questions than requested")
+        
+        # ⭐ VALIDATION: Fix MCQ answers - ensure answer matches one of the options
+        for q in all_questions:
+            if q.get("type") == "mcq" and q.get("options"):
+                answer = q.get("answer", "")
+                options = q.get("options", [])
+                
+                # Check if answer is just a letter (A, B, C, D)
+                if answer in ["A", "B", "C", "D"] and len(options) >= 4:
+                    # Convert letter to actual option text
+                    letter_index = {"A": 0, "B": 1, "C": 2, "D": 3}
+                    idx = letter_index.get(answer, 0)
+                    q["answer"] = options[idx]
+                    print(f"⚠️ Fixed MCQ answer: '{answer}' -> '{options[idx]}'")
+                
+                # Also check if answer doesn't match any option (case-insensitive)
+                elif answer.lower() not in [opt.lower() for opt in options]:
+                    # Try to find a matching option
+                    for opt in options:
+                        if answer.lower() in opt.lower() or opt.lower() in answer.lower():
+                            q["answer"] = opt
+                            print(f"⚠️ Fixed MCQ answer: '{answer}' -> '{opt}'")
+                            break
         
         # Split into Main and Demo (EQUAL COUNTS)
         main_qs = all_questions[:num_questions]
@@ -713,13 +1017,12 @@ async def submit_assignment(
         if check.data:
             raise HTTPException(status_code=400, detail="You have already submitted this assignment")
 
-        # ⭐ STORE EMAIL ALONG WITH SUBMISSION AND ADD TIMEZONE
+        # ⭐ STORE EMAIL ALONG WITH SUBMISSION
         data = {
             "assignment_id": str(assignment_id),
             "student_id": student_id,
-            "student_email": student_email,  # ⭐ ADD THIS
-            "file_data": b64_encoded,
-            "created_at": datetime.utcnow().isoformat() + "Z"  # ⭐ ADD Z for timezone
+            "student_email": student_email,
+            "file_data": b64_encoded
         }
         
         result = supabase.table("assignment_submissions").insert(data).execute()
@@ -743,6 +1046,43 @@ async def get_subjects():
     except Exception as e:
         print(f"❌ Get Subjects Error: {e}")
         return []
+
+@app.get("/teacher-subjects/{teacher_id}")
+async def get_teacher_subjects(teacher_id: str):
+    """Get all unique subjects for a teacher from their exams and assignments"""
+    try:
+        print(f"📋 Fetching subjects for teacher: {teacher_id}")
+        
+        # Get subjects from exams
+        exams = supabase.table("exams")\
+            .select("subject")\
+            .eq("teacher_id", teacher_id)\
+            .execute()
+        
+        # Get subjects from assignments
+        assignments = supabase.table("assignments")\
+            .select("subject")\
+            .eq("teacher_id", teacher_id)\
+            .execute()
+        
+        # Combine and deduplicate
+        subjects = set()
+        for exam in (exams.data or []):
+            if exam.get("subject"):
+                subjects.add(exam["subject"])
+        for assignment in (assignments.data or []):
+            if assignment.get("subject"):
+                subjects.add(assignment["subject"])
+        
+        subjects_list = sorted(list(subjects))
+        print(f"✅ Found {len(subjects_list)} unique subjects: {subjects_list}")
+        
+        return {"subjects": subjects_list}
+    except Exception as e:
+        print(f"❌ Get Teacher Subjects Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/submit-survey")
 async def submit_survey(s: SurveyCreate):
@@ -797,11 +1137,144 @@ Provide score and brief feedback. Output as JSON:
     except:
         return {"score": 0, "feedback": "Error grading answer"}
 
+class GradeExamRequest(BaseModel):
+    exam_id: str
+    student_answers: dict  # {question_id: student_answer}
+
+@app.post("/grade-exam")
+async def grade_exam(request: GradeExamRequest):
+    """Grade an entire exam - handles both MCQ and subjective questions"""
+    try:
+        # Get exam questions
+        exam_res = supabase.table("exams").select("*").eq("exam_id", request.exam_id.upper()).execute()
+        
+        if not exam_res.data:
+            raise HTTPException(status_code=404, detail="Exam not found")
+        
+        exam = exam_res.data[0]
+        questions = exam.get("questions_json", [])
+        
+        results = {}
+        total_score = 0
+        total_marks = 0
+        
+        for q in questions:
+            q_id = str(q.get("id"))
+            q_type = q.get("type", "").lower()
+            correct_answer = q.get("answer", "")
+            student_answer = request.student_answers.get(q_id, "")
+            marks = q.get("marks", 1)
+            total_marks += marks
+            
+            if q_type == "mcq":
+                # MCQ grading - case-insensitive comparison
+                is_correct = False
+                
+                # Direct match (case-insensitive)
+                if student_answer.strip().lower() == correct_answer.strip().lower():
+                    is_correct = True
+                
+                # Check if student selected the correct option by index/letter
+                options = q.get("options", [])
+                if not is_correct and student_answer in ["A", "B", "C", "D", "0", "1", "2", "3"]:
+                    letter_to_idx = {"A": 0, "B": 1, "C": 2, "D": 3, "0": 0, "1": 1, "2": 2, "3": 3}
+                    idx = letter_to_idx.get(student_answer, -1)
+                    if 0 <= idx < len(options) and options[idx].strip().lower() == correct_answer.strip().lower():
+                        is_correct = True
+                
+                # Check if answer matches any option that is the correct one
+                if not is_correct:
+                    for i, opt in enumerate(options):
+                        if student_answer.strip().lower() == opt.strip().lower():
+                            if opt.strip().lower() == correct_answer.strip().lower():
+                                is_correct = True
+                                break
+                
+                score = marks if is_correct else 0
+                total_score += score
+                
+                results[q_id] = {
+                    "type": "mcq",
+                    "correct": is_correct,
+                    "score": score,
+                    "max_marks": marks,
+                    "correct_answer": correct_answer,
+                    "student_answer": student_answer,
+                    "feedback": "Correct!" if is_correct else f"Incorrect. The correct answer is: {correct_answer}"
+                }
+            
+            else:  # Subjective
+                if not student_answer.strip():
+                    results[q_id] = {
+                        "type": "subjective",
+                        "correct": False,
+                        "score": 0,
+                        "max_marks": marks,
+                        "correct_answer": correct_answer,
+                        "student_answer": student_answer,
+                        "feedback": "No answer provided."
+                    }
+                else:
+                    # Use AI grading for subjective
+                    try:
+                        grade_prompt = f"""Grade this answer on a scale of 0.0 to 1.0.
+Question: {q.get('question', '')}
+Correct Answer: {correct_answer}
+Student Answer: {student_answer}
+Output JSON only: {{"score": 0.75, "feedback": "brief feedback"}}"""
+                        
+                        response = model.generate_content(grade_prompt)
+                        text = response.text.strip().replace("```json", "").replace("```", "").strip()
+                        grade_result = json.loads(text)
+                        
+                        ai_score = float(grade_result.get("score", 0))
+                        earned = round(ai_score * marks, 2)
+                        total_score += earned
+                        
+                        results[q_id] = {
+                            "type": "subjective",
+                            "correct": ai_score >= 0.5,
+                            "score": earned,
+                            "max_marks": marks,
+                            "correct_answer": correct_answer,
+                            "student_answer": student_answer,
+                            "feedback": grade_result.get("feedback", "")
+                        }
+                    except Exception as ai_err:
+                        print(f"⚠️ AI grading error for question {q_id}: {ai_err}")
+                        results[q_id] = {
+                            "type": "subjective",
+                            "correct": False,
+                            "score": 0,
+                            "max_marks": marks,
+                            "correct_answer": correct_answer,
+                            "student_answer": student_answer,
+                            "feedback": "Could not grade automatically"
+                        }
+        
+        print(f"✅ Graded exam {request.exam_id}: {total_score}/{total_marks}")
+        
+        return {
+            "exam_id": request.exam_id,
+            "total_score": total_score,
+            "total_marks": total_marks,
+            "percentage": round((total_score / total_marks) * 100, 2) if total_marks > 0 else 0,
+            "results": results
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Grade Exam Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/submit-exam-result")
 async def submit_exam_result(sub: SubmissionCreate):
     try:
-        # Get student email for storage
+        # Get student email and name for storage
         student_email = get_user_email(sub.student_id)
+        student_name = get_user_name(sub.student_id)
         
         # Check if exam had tab switches during session
         session_key = f"{sub.student_id}_{sub.exam_id}"
@@ -818,6 +1291,7 @@ async def submit_exam_result(sub: SubmissionCreate):
             "exam_id": sub.exam_id,
             "student_id": sub.student_id,
             "student_email": student_email,
+            "student_name": student_name,
             "score_numeric": sub.score_numeric,
             "total_marks": sub.total_marks,
             "time_taken_seconds": sub.time_taken_seconds,
@@ -827,7 +1301,15 @@ async def submit_exam_result(sub: SubmissionCreate):
             "score": f"{sub.score_numeric}/{sub.total_marks}"
         }
         supabase.table("submissions").insert(data).execute()
-        print(f"✅ Exam result submitted for {student_email} (cheating_log: {cheating_log})")
+        print(f"✅ Exam result submitted for {student_name} ({student_email}) (cheating_log: {cheating_log})")
+        
+        # Clean up session
+        if session_key in active_exam_sessions:
+            del active_exam_sessions[session_key]
+        
+        return {"message": "Exam result saved successfully"}
+    except Exception as e:
+        print(f"❌ Submit Result Error: {e}")
         
         # Clean up session
         if session_key in active_exam_sessions:
@@ -859,19 +1341,27 @@ async def get_teacher_stats(teacher_id: str):
         
         results = []
         for s in subs.data:
-            # Try to use stored email from submission, fallback to lookup
+            # Try to use stored email from submission, fallback to lookup, then fallback to student_id
             student_email = s.get("student_email")
             
-            # If no email in submission, fetch from auth
+            # If no email in submission, try to fetch from auth
             if not student_email:
-                student_email = get_user_email(s["student_id"])
+                try:
+                    student_email = get_user_email(s["student_id"])
+                except:
+                    pass
             
-            # If still no email, don't use "unknown@unknown.com" - skip or use a placeholder
+            # If still no email, use student_id as identifier (don't skip!)
             if not student_email:
-                print(f"⚠️ No email found for student {s['student_id']}, skipping this submission")
-                continue
+                student_email = f"student_{s['student_id'][:8]}"  # Use first 8 chars of ID
+                print(f"⚠️ Using student_id as identifier: {student_email}")
             
-            print(f"Student {s['student_id']} -> {student_email}")
+            # Get student name (from submission or fetch)
+            student_name = s.get("student_name")
+            if not student_name:
+                student_name = get_user_name(s["student_id"])
+            
+            print(f"Student {s['student_id']} -> {student_name} ({student_email})")
             
             # Determine if exam was clean or unclean based on cheating_log
             cheating_log = s.get("cheating_log") or []
@@ -881,6 +1371,7 @@ async def get_teacher_stats(teacher_id: str):
                 "exam_key": s["exam_id"],
                 "exam_name": exam_map.get(s["exam_id"], "Unknown"),
                 "student_email": student_email,
+                "student_name": student_name,
                 "score": s["score_numeric"],
                 "max_marks": s["total_marks"],
                 "time_taken": round(s["time_taken_seconds"] / 60, 2),
@@ -1023,6 +1514,19 @@ async def get_student_feedback(subject: str):
     try:
         print(f"📋 Fetching student feedback for subject: {subject}")
         
+        # First, let's see ALL feedback submissions in the database
+        all_feedback = supabase.table("feedback_submissions")\
+            .select("*")\
+            .execute()
+        
+        print(f"🔍 Total feedback submissions in database: {len(all_feedback.data if all_feedback.data else [])}")
+        
+        if all_feedback.data:
+            # Show all subjects in the database for comparison
+            all_subjects = set(f.get("subject") for f in all_feedback.data if f.get("subject"))
+            print(f"🔍 All subjects in feedback_submissions table: {all_subjects}")
+            print(f"🔍 Looking for subject: '{subject}'")
+        
         # Get all feedback submissions for this subject
         result = supabase.table("feedback_submissions")\
             .select("*")\
@@ -1031,7 +1535,10 @@ async def get_student_feedback(subject: str):
             .execute()
         
         feedback_list = result.data if result.data else []
-        print(f"Found {len(feedback_list)} feedback submissions for {subject}")
+        print(f"✅ Found {len(feedback_list)} feedback submissions for '{subject}'")
+        
+        if len(feedback_list) > 0:
+            print(f"📝 Sample feedback: {feedback_list[0]}")
         
         # Format the response
         formatted_feedback = []
@@ -1051,7 +1558,7 @@ async def get_student_feedback(subject: str):
             "subject": subject,
             "total_feedback": len(formatted_feedback),
             "feedback_list": formatted_feedback,
-            "average_rating": sum(f.get("rating", 0) for f in formatted_feedback) / len(formatted_feedback) if formatted_feedback else 0
+            "average_rating": sum(f.get("rating", 0) for f in formatted_feedback if f.get("rating") is not None) / len([f for f in formatted_feedback if f.get("rating") is not None]) if any(f.get("rating") is not None for f in formatted_feedback) else 0
         }
     except Exception as e:
         print(f"❌ Get Student Feedback Error: {e}")
