@@ -20,9 +20,9 @@ from reportlab.lib import colors
 
 
 # CONFIGURATION
-SUPABASE_URL = "https://iophhaxzcikbnjcgiwta.supabase.co" 
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlvcGhoYXh6Y2lrYm5qY2dpd3RhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUwMTk1NDQsImV4cCI6MjA4MDU5NTU0NH0.E1E16M1TDcR_0bg6GZhBWeD1c9OYKtuMKFCnT3u8K6M"
-GEMINI_API_KEY = "AIzaSyD8TPUGTOKaLe4LE1FE77rjrJaStRlXoXY"
+SUPABASE_URL = "https://brfoehkebzftksizwvsr.supabase.co" 
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJyZm9laGtlYnpmdGtzaXp3dnNyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY5MTE0NDksImV4cCI6MjA4MjQ4NzQ0OX0.Ajn7mldu_waj7oQTLIrDMCrpEETaEABpzTIgnhT5ecg"
+GEMINI_API_KEY = "AIzaSyDFqmcOZmh2E9loTW3LqGTjdPZGkqsHN3w"
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB in bytes
 
@@ -42,8 +42,8 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://examease-frontend.vercel.app",
-        "https://examease-backend-4bdx.onrender.com",
+        "https://examease-frontend-five.vercel.app/",
+        "https://examease-backend-lg90.onrender.com",
         "http://localhost:5173", 
         "http://localhost:3000"  
     ],
