@@ -42,7 +42,7 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://examease-frontend-five.vercel.app/",
+        "https://examease-frontend-five.vercel.app",
         "https://examease-backend-lg90.onrender.com",
         "http://localhost:5173", 
         "http://localhost:3000"  
